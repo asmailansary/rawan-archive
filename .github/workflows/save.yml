@@ -24,7 +24,10 @@ jobs:
           python-version: "3.12"
 
       - name: Install
-        run: pip install -U "yt-dlp[default,curl-cffi]" requests
+        run: pip install -U "yt-dlp[default,curl-cffi]" requests playwright
+
+      - name: Install browser (fallback for TikTok)
+        run: playwright install --with-deps chromium
 
       - name: Prepare TikTok cookies (optional)
         env:

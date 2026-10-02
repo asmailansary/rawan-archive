@@ -11,6 +11,7 @@
 import json
 import mimetypes
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -104,14 +105,61 @@ def list_tiktok_ids(user: str):
     return ids, ("" if ids else "yt-dlp لم يُرجع أي عناصر")
 
 
+def list_tiktok_ids_browser(user: str):
+    """بديل عند فشل yt-dlp: متصفح حقيقي يفتح الملف الشخصي ويجمع معرّفات الفيديوهات."""
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception as e:  # noqa: BLE001
+        return [], f"playwright غير مثبت: {e}"
+    ua = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+          "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(args=["--no-sandbox"])
+            ctx = browser.new_context(user_agent=ua, locale="en-US", viewport={"width": 1280, "height": 900})
+            page = ctx.new_page()
+            api_ids = set()
+
+            def on_response(resp):
+                if "item_list" in resp.url:
+                    try:
+                        for it in (resp.json().get("itemList") or []):
+                            if it.get("id"):
+                                api_ids.add(str(it["id"]))
+                    except Exception:  # noqa: BLE001
+                        pass
+
+            page.on("response", on_response)
+            page.goto(f"https://www.tiktok.com/@{user}", wait_until="domcontentloaded", timeout=60000)
+            page.wait_for_timeout(5000)
+            title = page.title()
+            for _ in range(15):
+                page.mouse.wheel(0, 5000)
+                page.wait_for_timeout(1500)
+            hrefs = page.eval_on_selector_all('a[href*="/video/"]', "els => els.map(e => e.href)")
+            dom_ids = {m.group(1) for h in hrefs for m in [re.search(r"/video/(\d+)", h)] if m}
+            body = " ".join((page.inner_text("body") or "").split())[:160]
+            browser.close()
+        ids = sorted(api_ids | dom_ids, key=int, reverse=True)  # الأحدث أولاً
+        return ids, f"title={title!r} api={len(api_ids)} dom={len(dom_ids)} body={body!r}"
+    except Exception as e:  # noqa: BLE001
+        return [], f"browser error: {e}"
+
+
 def sync_tiktok(user: str, cap: int) -> None:
     global errors, warnings, saved
     user = user.lstrip("@")
     log(f"[تيك توك] فحص @{user}")
     ids, err = list_tiktok_ids(user)
     if not ids:
+        log(f"[تيك توك] yt-dlp لم يجد منشورات لـ @{user}: {err}. أجرّب المتصفح...")
+        ids, info = list_tiktok_ids_browser(user)
+        log(f"[تيك توك] المتصفح: {len(ids)} معرّف. {info}")
+        note("notice", f"TikTok browser @{user}", f"ids={len(ids)} {info}")
+        err = f"{err} | browser: {info}"
+    if not ids:
         warnings += 1
-        log(f"[تيك توك] تنبيه: لا توجد منشورات ظاهرة لـ @{user}: {err}")
+        log(f"[تيك توك] تنبيه: لا توجد منشورات ظاهرة لـ @{user}")
         note("warning", f"TikTok @{user}", err)
         return
     known = existing_ids("tiktok_posts", user)
