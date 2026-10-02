@@ -453,6 +453,48 @@ def _tget(url: str, params=None):
         return requests.get(url, headers=T_HEADERS, params=params, timeout=30)
 
 
+def tellonym_via_browser(name: str):
+    """يفتح صفحة الملف في متصفح حقيقي ويلتقط ردود الـ API التي تحمل الإجابات."""
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception as e:  # noqa: BLE001
+        return [], f"playwright غير مثبت: {e}"
+    got, seen = {}, []
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(args=["--no-sandbox"])
+            ctx = browser.new_context(locale="en-US", viewport={"width": 1280, "height": 1600},
+                                      user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                                                 "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+            page = ctx.new_page()
+
+            def on_resp(resp):
+                if "api.tellonym.me" not in resp.url:
+                    return
+                seen.append(f"{resp.status} {resp.url.split('tellonym.me')[-1][:60]}")
+                try:
+                    data = resp.json()
+                except Exception:  # noqa: BLE001
+                    return
+                for a in (data.get("answers") or []) if isinstance(data, dict) else []:
+                    if isinstance(a, dict) and a.get("id") is not None:
+                        got[str(a["id"])] = a
+
+            page.on("response", on_resp)
+            page.goto(f"https://tellonym.me/{name}", wait_until="networkidle", timeout=60000)
+            last = -1
+            for _ in range(60):                      # تمرير الصفحة لتحميل الأقدم
+                page.mouse.wheel(0, 4000)
+                page.wait_for_timeout(1200)
+                if len(got) == last:
+                    break
+                last = len(got)
+            browser.close()
+    except Exception as e:  # noqa: BLE001
+        return list(got.values()), f"browser error: {e} | seen={seen[:8]}"
+    return list(got.values()), f"seen={seen[:8]}"
+
+
 def fetch_tellonym(name: str, limit: int = 25) -> list:
     tried, last_status = [], 200
     # الطريقة 1: slug -> id -> answers (كما في كود المستخدم)  |  الطريقة 2: profiles/name
@@ -521,6 +563,9 @@ def fetch_tellonym(name: str, limit: int = 25) -> list:
                     note("notice", "Tellonym html keys", json.dumps(d.get("props", {}).get("pageProps", {}), ensure_ascii=False)[:600])
         except Exception as e:  # noqa: BLE001
             note("notice", "Tellonym html", f"error {e}")
+    if not items:
+        items, info = tellonym_via_browser(name)
+        note("notice", "Tellonym browser", f"items={len(items)} {info}")
     if not items and last_status != 200:
         class _E(Exception):
             pass

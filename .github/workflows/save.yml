@@ -35,6 +35,11 @@ jobs:
       - name: Install
         run: pip install -U "yt-dlp[default,curl-cffi]" requests
 
+      - name: Install browser (for Tellonym)
+        run: |
+          pip install playwright
+          playwright install --with-deps chromium
+
       - name: Prepare TikTok cookies (optional)
         env:
           COOKIES: ${{ secrets.TIKTOK_COOKIES }}
