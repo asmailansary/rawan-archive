@@ -30,7 +30,8 @@ H = {"apikey": SB_KEY}
 if not SB_KEY.startswith("sb_"):  # المفاتيح القديمة (JWT) تُرسل أيضاً في Authorization
     H["Authorization"] = f"Bearer {SB_KEY}"
 
-errors = 0
+errors = 0      # أخطاء حقيقية: تجعل التشغيل يظهر ❌
+warnings = 0    # تنبيهات: حساب بلا منشورات، أو موقع يحجب GitHub
 
 
 def log(msg: str) -> None:
@@ -92,13 +93,13 @@ def list_tiktok_ids(user: str) -> list:
 
 
 def sync_tiktok(user: str, cap: int) -> None:
-    global errors
+    global errors, warnings
     user = user.lstrip("@")
     log(f"[تيك توك] فحص @{user}")
     ids = list_tiktok_ids(user)
     if not ids:
-        log(f"[تيك توك] لم يُرجع أي منشورات لـ @{user} (حجب أو حساب خاص؟ جرّب cookies)")
-        errors += 1
+        warnings += 1
+        log(f"[تيك توك] تنبيه: لا توجد منشورات ظاهرة لـ @{user} (لا منشورات بعد، أو حساب خاص، أو حجب)")
         return
     known = existing_ids("tiktok_posts", user)
     todo = [i for i in ids if i not in known]
@@ -183,15 +184,19 @@ def fetch_tellonym(name: str, limit: int = 25) -> list:
 
 
 def sync_tellonym(name: str) -> None:
-    global errors
+    global errors, warnings
     name = name.lstrip("@")
     log(f"[تيلونيم] فحص {name}")
     try:
         items = fetch_tellonym(name)
     except requests.HTTPError as e:
-        errors += 1
         code = e.response.status_code if e.response is not None else "?"
-        log(f"[تيلونيم] فشل الطلب (HTTP {code}) — قد تكون الواجهة تغيّرت أو حجبت عناوين GitHub")
+        if code == 403:
+            warnings += 1
+            log("[تيلونيم] تنبيه: الموقع رفض الطلب (403)، غالباً يحجب عناوين GitHub. تم التخطي.")
+        else:
+            errors += 1
+            log(f"[تيلونيم] فشل الطلب (HTTP {code}) — قد تكون الواجهة تغيّرت")
         return
 
     known = existing_ids("tellonym_answers", name)
@@ -231,7 +236,7 @@ def main() -> None:
             errors += 1
             log(f"[تيلونيم] خطأ في {u}: {e}")
 
-    log(f"انتهى. عدد الأخطاء: {errors}")
+    log(f"انتهى. أخطاء: {errors}، تنبيهات: {warnings}")
     sys.exit(1 if errors else 0)
 
 
