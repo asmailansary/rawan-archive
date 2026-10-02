@@ -24,7 +24,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install
-        run: pip install -U yt-dlp requests
+        run: pip install -U "yt-dlp[default,curl-cffi]" requests
 
       - name: Prepare TikTok cookies (optional)
         env:
