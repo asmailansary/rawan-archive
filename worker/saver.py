@@ -443,14 +443,43 @@ T_HEADERS = {
 }
 
 
+T_TOKEN = {"v": None}
+
+
+def _tellonym_token() -> str:
+    """رمز الدخول: من TELLONYM_TOKEN مباشرة، أو بتسجيل الدخول بـ TELLONYM_EMAIL/TELLONYM_PASSWORD (حسابك أنت)."""
+    if T_TOKEN["v"] is not None:
+        return T_TOKEN["v"]
+    tok = os.environ.get("TELLONYM_TOKEN", "").strip()
+    email, pw = os.environ.get("TELLONYM_EMAIL", "").strip(), os.environ.get("TELLONYM_PASSWORD", "")
+    if not tok and email and pw:
+        try:
+            from curl_cffi import requests as cr
+            r = cr.post("https://api.tellonym.me/tokens/create", impersonate="chrome", timeout=30,
+                        headers={"Accept": "application/json", "tellonym-client": "web:3.80.0"},
+                        json={"email": email, "password": pw, "limit": 0})
+            try:
+                tok = (r.json() or {}).get("accessToken") or ""
+            except Exception:  # noqa: BLE001
+                tok = ""
+            note("notice", "Tellonym login", f"status={r.status_code} token={'yes' if tok else 'no'} body={'' if tok else r.text[:150]}")
+        except Exception as e:  # noqa: BLE001
+            note("notice", "Tellonym login", f"error {e}")
+    T_TOKEN["v"] = tok
+    return tok
+
+
 def _tget(url: str, params=None):
-    """طلب GET يحاكي متصفح Chrome الحقيقي (بصمة TLS) لتجاوز الحجب البسيط."""
+    """طلب GET يحاكي متصفح Chrome الحقيقي (بصمة TLS) ويرسل Bearer إن وُجد."""
+    h = {"Accept": "application/json", "tellonym-client": "web:3.80.0"}
+    tok = _tellonym_token()
+    if tok:
+        h["Authorization"] = f"Bearer {tok}"
     try:
         from curl_cffi import requests as cr
-        return cr.get(url, headers={"Accept": "application/json", "tellonym-client": "web:1.0.0"},
-                      params=params, impersonate="chrome", timeout=30)
+        return cr.get(url, headers=h, params=params, impersonate="chrome", timeout=30)
     except ImportError:
-        return requests.get(url, headers=T_HEADERS, params=params, timeout=30)
+        return requests.get(url, headers={**T_HEADERS, **h}, params=params, timeout=30)
 
 
 def tellonym_via_browser(name: str):

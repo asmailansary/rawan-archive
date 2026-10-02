@@ -56,4 +56,7 @@ jobs:
           PURGE_ACCOUNTS: ${{ github.event.inputs.purge }}
           APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
           APIFY_RESULTS: ${{ github.event.inputs.backfill }}
+          TELLONYM_TOKEN: ${{ secrets.TELLONYM_TOKEN }}
+          TELLONYM_EMAIL: ${{ secrets.TELLONYM_EMAIL }}
+          TELLONYM_PASSWORD: ${{ secrets.TELLONYM_PASSWORD }}
         run: python worker/saver.py
