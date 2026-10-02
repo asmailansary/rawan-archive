@@ -42,6 +42,13 @@ def log(msg: str) -> None:
     print(f"[{datetime.now():%H:%M:%S}] {msg}", flush=True)
 
 
+def errors_add(e) -> None:
+    global errors
+    errors += 1
+    log(f"خطأ: {e}")
+    note("error", "Purge", e)
+
+
 def note(level: str, title: str, msg) -> None:
     """يكتب رسالة تظهر ضمن تنبيهات التشغيل في GitHub (level: notice | warning | error)."""
     text = " ".join(str(msg).split())[:900]
@@ -144,11 +151,52 @@ def list_tiktok_ids_browser(user: str):
             dom_ids = {m.group(1) for h in hrefs
                        for m in [re.search(rf"/@{re.escape(user)}/video/(\d+)", h, re.I)] if m}
             body = " ".join((page.inner_text("body") or "").split())[:160]
+            embed_ids, embed_len = set(), 0
+            try:
+                page.goto(f"https://www.tiktok.com/embed/@{user}", wait_until="domcontentloaded", timeout=60000)
+                page.wait_for_timeout(4000)
+                html = page.content()
+                embed_len = len(html)
+                embed_ids = set(re.findall(rf"/@{re.escape(user)}/video/(\d+)", html, re.I))
+            except Exception:  # noqa: BLE001
+                pass
             browser.close()
-        ids = sorted(api_ids | dom_ids, key=int, reverse=True)  # الأحدث أولاً
-        return ids, f"title={title!r} api={len(api_ids)} dom={len(dom_ids)} body={body!r}"
+        ids = sorted(api_ids | dom_ids | embed_ids, key=int, reverse=True)  # الأحدث أولاً
+        return ids, f"title={title!r} api={len(api_ids)} dom={len(dom_ids)} embed={len(embed_ids)} embed_html={embed_len} body={body!r}"
     except Exception as e:  # noqa: BLE001
         return [], f"browser error: {e}"
+
+
+def remove_posts(rows: list) -> None:
+    """يحذف سجلات tiktok_posts مع ملفاتها (الفيديو والصورة المصغرة) من التخزين."""
+    for k in range(0, len(rows), 50):
+        chunk = rows[k:k + 50]
+        paths = [p for row in chunk for p in (row.get("video_path"), row.get("thumb_path")) if p]
+        if paths:
+            requests.delete(f"{SB_URL}/storage/v1/object/{BUCKET}",
+                            headers={**H, "Content-Type": "application/json"},
+                            data=json.dumps({"prefixes": paths}), timeout=120).raise_for_status()
+        ids = ",".join(row["id"] for row in chunk)
+        requests.delete(f"{SB_URL}/rest/v1/tiktok_posts", headers={**H, "Prefer": "return=minimal"},
+                        params={"id": f"in.({ids})"}, timeout=60).raise_for_status()
+
+
+def purge_account(user: str) -> None:
+    """حذف كل ما حُفظ لهذا الحساب (يُستخدم يدوياً لمرة واحدة عبر خيار purge)."""
+    rows, offset = [], 0
+    while True:
+        r = requests.get(f"{SB_URL}/rest/v1/tiktok_posts", headers=H,
+                         params={"select": "id,video_path,thumb_path", "account": f"eq.{user}",
+                                 "limit": 1000, "offset": offset}, timeout=60)
+        r.raise_for_status()
+        batch = r.json()
+        rows.extend(batch)
+        if len(batch) < 1000:
+            break
+        offset += 1000
+    remove_posts(rows)
+    log(f"[تنظيف] حُذف {len(rows)} سجل لـ @{user}")
+    note("notice", f"Purge @{user}", f"removed {len(rows)} rows")
 
 
 def cleanup_foreign(user: str) -> None:
@@ -174,16 +222,7 @@ def cleanup_foreign(user: str) -> None:
         offset += 1000
     if not bad:
         return
-    for k in range(0, len(bad), 50):
-        chunk = bad[k:k + 50]
-        paths = [p for row in chunk for p in (row.get("video_path"), row.get("thumb_path")) if p]
-        if paths:
-            requests.delete(f"{SB_URL}/storage/v1/object/{BUCKET}",
-                            headers={**H, "Content-Type": "application/json"},
-                            data=json.dumps({"prefixes": paths}), timeout=120).raise_for_status()
-        ids = ",".join(row["id"] for row in chunk)
-        requests.delete(f"{SB_URL}/rest/v1/tiktok_posts", headers={**H, "Prefer": "return=minimal"},
-                        params={"id": f"in.({ids})"}, timeout=60).raise_for_status()
+    remove_posts(bad)
     log(f"[تيك توك] نُظّف {len(bad)} سجل خاطئ كان منسوباً لـ @{user}")
     note("notice", f"Cleanup @{user}", f"removed {len(bad)} wrongly attributed videos")
 
@@ -345,6 +384,11 @@ def main() -> None:
     global errors
     cfg = json.loads((Path(__file__).parent.parent / "config.json").read_text(encoding="utf-8"))
     cap = int(cfg.get("max_new_videos_per_run", 20))
+    for acc in [a.strip().lstrip("@") for a in os.environ.get("PURGE_ACCOUNTS", "").split(",") if a.strip()]:
+        try:
+            purge_account(acc)
+        except Exception as e:  # noqa: BLE001
+            errors_add(e)
 
     for u in cfg.get("tiktok", []):
         try:

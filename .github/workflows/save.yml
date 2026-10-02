@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: "17 */3 * * *"   # كل 3 ساعات
   workflow_dispatch:          # تشغيل يدوي من تبويب Actions
+    inputs:
+      purge:
+        description: "حسابات يُحذف كل ما حُفظ لها (مفصولة بفاصلة)، اتركه فارغاً عادةً"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -42,4 +47,5 @@ jobs:
         env:
           SUPABASE_URL: https://amfkhunxocjmmmumrftr.supabase.co
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          PURGE_ACCOUNTS: ${{ github.event.inputs.purge }}
         run: python worker/saver.py
