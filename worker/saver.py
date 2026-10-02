@@ -489,6 +489,38 @@ def fetch_tellonym(name: str, limit: int = 25) -> list:
         pos += len(batch)
         time.sleep(1.5)
     note("notice", "Tellonym probe", " ".join(tried))
+    if not items:
+        try:
+            from curl_cffi import requests as cr
+            h = cr.get(f"https://tellonym.me/{quote(name)}", impersonate="chrome", timeout=30)
+            t = h.text
+            import re as _re
+            nd = _re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', t, _re.S)
+            note("notice", "Tellonym html", f"status={h.status_code} len={len(t)} next_data={'yes' if nd else 'no'} "
+                 f"has_answers={'answer' in t.lower()} head={' '.join(t[:200].split())}")
+            if nd:
+                d = json.loads(nd.group(1))
+                def find(o):
+                    if isinstance(o, dict):
+                        if isinstance(o.get("answers"), list) and o["answers"]:
+                            return o["answers"]
+                        for v in o.values():
+                            r_ = find(v)
+                            if r_:
+                                return r_
+                    elif isinstance(o, list):
+                        for v in o:
+                            r_ = find(v)
+                            if r_:
+                                return r_
+                    return None
+                found = find(d)
+                if found:
+                    items = found
+                else:
+                    note("notice", "Tellonym html keys", json.dumps(d.get("props", {}).get("pageProps", {}), ensure_ascii=False)[:600])
+        except Exception as e:  # noqa: BLE001
+            note("notice", "Tellonym html", f"error {e}")
     return items
 
 
