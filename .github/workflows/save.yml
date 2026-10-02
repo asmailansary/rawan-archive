@@ -9,6 +9,10 @@ on:
         description: "عدد المنشورات القديمة المطلوب حفظها لكل حساب (مثلاً 100). اتركه فارغاً عادةً"
         required: false
         default: ""
+      wait:
+        description: "ثوانٍ تنتظرها الأداة قبل الجلب (لإتمام معالجة تيك توك للمنشور). اكتب 0 للتشغيل الفوري"
+        required: false
+        default: "90"
       purge:
         description: "حسابات يُحذف كل ما حُفظ لها (مفصولة بفاصلة)، اتركه فارغاً عادةً"
         required: false
@@ -16,6 +20,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: save-posts
@@ -26,21 +31,41 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
+      - name: Skip if ran recently (phone automation guard)
+        id: guard
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.wait != '0' && github.event.inputs.backfill == '' && github.event.inputs.purge == ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          RECENT=$(gh api "repos/${{ github.repository }}/actions/workflows/save.yml/runs?status=completed&per_page=5" \
+            --jq "[.workflow_runs[] | select(.id != ${{ github.run_id }}) | select((now - (.updated_at | fromdateiso8601)) < 1200)] | length")
+          echo "recent=$RECENT" >> "$GITHUB_OUTPUT"
+          if [ "$RECENT" != "0" ]; then echo "::notice title=Guard::تخطي: تم تشغيل الحفظ قبل أقل من 20 دقيقة"; fi
+
+      - name: Wait for TikTok to finish processing
+        if: steps.guard.outputs.recent != '' && steps.guard.outputs.recent == '0'
+        run: sleep "${{ github.event.inputs.wait }}"
+
       - uses: actions/checkout@v4
+        if: steps.guard.outputs.recent == '' || steps.guard.outputs.recent == '0'
 
       - uses: actions/setup-python@v5
+        if: steps.guard.outputs.recent == '' || steps.guard.outputs.recent == '0'
         with:
           python-version: "3.12"
 
       - name: Install
+        if: steps.guard.outputs.recent == '' || steps.guard.outputs.recent == '0'
         run: pip install -U "yt-dlp[default,curl-cffi]" requests
 
       - name: Install browser (for Tellonym)
+        if: steps.guard.outputs.recent == '' || steps.guard.outputs.recent == '0'
         run: |
           pip install playwright
           playwright install --with-deps chromium
 
       - name: Prepare TikTok cookies (optional)
+        if: steps.guard.outputs.recent == '' || steps.guard.outputs.recent == '0'
         env:
           COOKIES: ${{ secrets.TIKTOK_COOKIES }}
         run: |
@@ -50,6 +75,7 @@ jobs:
           fi
 
       - name: Save new posts
+        if: steps.guard.outputs.recent == '' || steps.guard.outputs.recent == '0'
         env:
           SUPABASE_URL: https://amfkhunxocjmmmumrftr.supabase.co
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
