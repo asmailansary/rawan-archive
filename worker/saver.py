@@ -32,10 +32,17 @@ if not SB_KEY.startswith("sb_"):  # المفاتيح القديمة (JWT) تُر
 
 errors = 0      # أخطاء حقيقية: تجعل التشغيل يظهر ❌
 warnings = 0    # تنبيهات: حساب بلا منشورات، أو موقع يحجب GitHub
+saved = 0       # عدد الفيديوهات المحفوظة في هذا التشغيل
 
 
 def log(msg: str) -> None:
     print(f"[{datetime.now():%H:%M:%S}] {msg}", flush=True)
+
+
+def note(level: str, title: str, msg) -> None:
+    """يكتب رسالة تظهر ضمن تنبيهات التشغيل في GitHub (level: notice | warning | error)."""
+    text = " ".join(str(msg).split())[:900]
+    print(f"::{level} title={title}::{text}", flush=True)
 
 
 # ------------------------- Supabase -------------------------
@@ -83,23 +90,29 @@ def upload(local: Path, remote: str) -> str:
 
 
 # ------------------------- تيك توك -------------------------
-def list_tiktok_ids(user: str) -> list:
-    opts = {"extract_flat": True, "quiet": True, "ignoreerrors": True, "skip_download": True}
+def list_tiktok_ids(user: str):
+    """يرجع (قائمة المعرفات، نص الخطأ إن وُجد)."""
+    opts = {"extract_flat": True, "quiet": True, "skip_download": True}
     if COOKIES:
         opts["cookiefile"] = COOKIES
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(f"https://www.tiktok.com/@{user}", download=False)
-    return [e["id"] for e in (info or {}).get("entries", []) if e and e.get("id")]
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(f"https://www.tiktok.com/@{user}", download=False)
+    except Exception as e:  # noqa: BLE001
+        return [], str(e)
+    ids = [e["id"] for e in (info or {}).get("entries", []) if e and e.get("id")]
+    return ids, ("" if ids else "yt-dlp لم يُرجع أي عناصر")
 
 
 def sync_tiktok(user: str, cap: int) -> None:
-    global errors, warnings
+    global errors, warnings, saved
     user = user.lstrip("@")
     log(f"[تيك توك] فحص @{user}")
-    ids = list_tiktok_ids(user)
+    ids, err = list_tiktok_ids(user)
     if not ids:
         warnings += 1
-        log(f"[تيك توك] تنبيه: لا توجد منشورات ظاهرة لـ @{user} (لا منشورات بعد، أو حساب خاص، أو حجب)")
+        log(f"[تيك توك] تنبيه: لا توجد منشورات ظاهرة لـ @{user}: {err}")
+        note("warning", f"TikTok @{user}", err)
         return
     known = existing_ids("tiktok_posts", user)
     todo = [i for i in ids if i not in known]
@@ -144,9 +157,11 @@ def sync_tiktok(user: str, cap: int) -> None:
                 "info": {k: info.get(k) for k in keep},
             }])
             log(f"[تيك توك] حُفظ {vid}")
+            saved += 1
         except Exception as e:  # noqa: BLE001
             errors += 1
             log(f"[تيك توك] فشل {vid}: {e}")
+            note("error", f"TikTok {vid}", e)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
         time.sleep(3)
@@ -194,6 +209,7 @@ def sync_tellonym(name: str) -> None:
         if code == 403:
             warnings += 1
             log("[تيلونيم] تنبيه: الموقع رفض الطلب (403)، غالباً يحجب عناوين GitHub. تم التخطي.")
+            note("warning", f"Tellonym {name}", "HTTP 403 - blocked from GitHub runner")
         else:
             errors += 1
             log(f"[تيلونيم] فشل الطلب (HTTP {code}) — قد تكون الواجهة تغيّرت")
@@ -236,7 +252,8 @@ def main() -> None:
             errors += 1
             log(f"[تيلونيم] خطأ في {u}: {e}")
 
-    log(f"انتهى. أخطاء: {errors}، تنبيهات: {warnings}")
+    log(f"انتهى. محفوظ: {saved}، أخطاء: {errors}، تنبيهات: {warnings}")
+    note("notice", "Summary", f"saved={saved} errors={errors} warnings={warnings}")
     sys.exit(1 if errors else 0)
 
 
