@@ -139,7 +139,10 @@ def list_tiktok_ids_apify(user: str, limit: int):
         if vid.isdigit() and (not author or author == user.lower()):
             ids.append(vid)
     ids = sorted(set(ids), key=int, reverse=True)
-    return ids, ("" if ids else f"Apify أرجع {len(items) if isinstance(items, list) else '?'} عنصراً بلا منشورات صالحة")
+    if ids:
+        return ids, ""
+    sample = json.dumps(items[0], ensure_ascii=False)[:450] if isinstance(items, list) and items else str(items)[:450]
+    return [], f"Apify أرجع {len(items) if isinstance(items, list) else '?'} عنصراً بلا منشورات صالحة. أول عنصر: {sample}"
 
 
 def list_tiktok_ids_browser(user: str):
