@@ -454,7 +454,7 @@ def _tget(url: str, params=None):
 
 
 def fetch_tellonym(name: str, limit: int = 25) -> list:
-    tried = []
+    tried, last_status = [], 200
     # الطريقة 1: slug -> id -> answers (كما في كود المستخدم)  |  الطريقة 2: profiles/name
     uid = None
     r = _tget(f"https://api.tellonym.me/accounts/slug/{quote(name)}")
@@ -478,7 +478,7 @@ def fetch_tellonym(name: str, limit: int = 25) -> list:
                 uid = None
                 base = TELLONYM_API.format(name=quote(name))
                 continue
-            r.raise_for_status() if hasattr(r, "raise_for_status") else None
+            last_status = r.status_code
             break
         batch = r.json().get("answers") or []
         if not batch:
@@ -521,6 +521,12 @@ def fetch_tellonym(name: str, limit: int = 25) -> list:
                     note("notice", "Tellonym html keys", json.dumps(d.get("props", {}).get("pageProps", {}), ensure_ascii=False)[:600])
         except Exception as e:  # noqa: BLE001
             note("notice", "Tellonym html", f"error {e}")
+    if not items and last_status != 200:
+        class _E(Exception):
+            pass
+        err = _E(f"HTTP {last_status}")
+        err.response = type("R", (), {"status_code": last_status})()
+        raise err
     return items
 
 
