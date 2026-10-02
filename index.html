@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>أرشيفي</title>
+<title>قاعدة بيانات خاصة</title>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <style>
   :root { --bg:#0f1115; --card:#181b22; --line:#262a33; --text:#e8eaf0; --mute:#8b92a3; --acc:#4f8cff; }
@@ -37,12 +37,23 @@
   #modal video { max-width:100%; max-height:78vh; border-radius:12px; background:#000; }
   #modal .row { display:flex; gap:8px; }
   #modal a { text-decoration:none; color:var(--text); background:var(--card); border:1px solid var(--line); border-radius:10px; padding:10px 14px; }
+  .chips { display:flex; gap:8px; overflow-x:auto; margin-bottom:12px; padding-bottom:4px; }
+  .chips button { white-space:nowrap; }
+  .chips button.on { background:var(--acc); border-color:var(--acc); color:#fff; }
+  .bar { display:flex; gap:8px; align-items:center; margin-bottom:12px; flex-wrap:wrap; }
+  button.danger { background:#c0392b; border-color:#c0392b; color:#fff; }
+  .post.sel { outline:3px solid #ff6b6b; }
+  .post .badge { position:absolute; top:6px; right:6px; background:rgba(0,0,0,.65); color:#fff; border-radius:8px; padding:2px 7px; font-size:12px; }
+  .post { position:relative; }
+  #photos { display:flex; flex-direction:column; gap:8px; max-height:76vh; overflow-y:auto; align-items:center; }
+  #photos img { max-width:100%; border-radius:12px; }
+  #mcap { color:var(--mute); max-width:560px; text-align:center; font-size:14px; max-height:8vh; overflow:auto; }
 </style>
 </head>
 <body>
 
 <form id="login" hidden>
-  <h1>أرشيفي — تسجيل الدخول</h1>
+  <h1>قاعدة بيانات خاصة — تسجيل الدخول</h1>
   <input id="email" type="email" placeholder="البريد الإلكتروني" autocomplete="username" required>
   <input id="pass" type="password" placeholder="كلمة المرور" autocomplete="current-password" required>
   <div id="err"></div>
@@ -50,23 +61,27 @@
 </form>
 
 <div id="setup" class="wrap empty" hidden>
-  <h1>أرشيفي</h1>
+  <h1>قاعدة بيانات خاصة</h1>
   <p>الصفحة تعمل، لكن لم يتم ربطها بـ Supabase بعد.</p>
   <p>عدّل السطرين <code>SUPABASE_URL</code> و <code>SUPABASE_ANON_KEY</code> في أعلى كود الصفحة.</p>
 </div>
 
 <div id="app" class="wrap" hidden>
   <header>
-    <h1>أرشيفي</h1>
+    <h1>قاعدة بيانات خاصة</h1>
     <button id="logout">خروج</button>
   </header>
   <div class="tabs">
     <button id="tab-tiktok" class="on">تيك توك</button>
     <button id="tab-tellonym">تيلونيم</button>
   </div>
+  <div id="chips" class="chips"></div>
   <div class="filters">
-    <select id="account"><option value="">كل الحسابات</option></select>
     <input id="search" type="search" placeholder="بحث...">
+  </div>
+  <div class="bar">
+    <button id="selmode">تحديد للحذف</button>
+    <button id="delsel" class="danger" hidden>حذف المحدد</button>
   </div>
   <div id="count"></div>
   <div id="list"></div>
@@ -74,8 +89,10 @@
 </div>
 
 <div id="modal" hidden>
-  <video id="player" controls playsinline></video>
-  <div class="row"><a id="dl" href="#" download>تحميل</a><button id="close">إغلاق</button></div>
+  <video id="player" controls playsinline hidden></video>
+  <div id="photos" hidden></div>
+  <div id="mcap"></div>
+  <div class="row"><a id="dl" href="#" download>تحميل</a><button id="del" class="danger">حذف</button><button id="close">إغلاق</button></div>
 </div>
 
 <script>
@@ -91,7 +108,8 @@ try {
   if (ready && typeof supabase !== "undefined") sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 } catch (e) { console.error(e); }
 const PAGE = 24;
-let tab = "tiktok", page = 0, timer;
+let tab = "tiktok", page = 0, timer, account = "", selMode = false, selected = new Map(), cfg = {};
+const tableOf = () => (tab === "tiktok" ? "tiktok_posts" : "tellonym_answers");
 
 function esc(s) {
   return String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -102,18 +120,16 @@ function fmtDate(d) {
 
 async function init() {
   if (!sb) { $("setup").hidden = false; return; }
+  try { cfg = await (await fetch("config.json", { cache: "no-store" })).json(); } catch (e) { cfg = {}; }
   try {
     const { data: { session } } = await sb.auth.getSession();
     show(!!session);
-  } catch (e) {
-    console.error(e);
-    show(false);
-  }
+  } catch (e) { console.error(e); show(false); }
 }
 function show(ok) {
   $("login").hidden = ok;
   $("app").hidden = !ok;
-  if (ok) { loadAccounts(); load(true); }
+  if (ok) openTab(tab);
 }
 
 $("login").onsubmit = async e => {
@@ -125,38 +141,39 @@ $("login").onsubmit = async e => {
 };
 $("logout").onclick = async () => { await sb.auth.signOut(); show(false); };
 
-function setTab(t) {
-  tab = t;
-  $("tab-tiktok").classList.toggle("on", t === "tiktok");
-  $("tab-tellonym").classList.toggle("on", t === "tellonym");
-  $("account").value = "";
-  loadAccounts();
-  load(true);
-}
-$("tab-tiktok").onclick = () => setTab("tiktok");
-$("tab-tellonym").onclick = () => setTab("tellonym");
-$("account").onchange = () => load(true);
+$("tab-tiktok").onclick = () => openTab("tiktok");
+$("tab-tellonym").onclick = () => openTab("tellonym");
 $("search").oninput = () => { clearTimeout(timer); timer = setTimeout(() => load(true), 350); };
 $("more").onclick = () => { page++; load(false); };
 
-async function loadAccounts() {
-  const table = tab === "tiktok" ? "tiktok_posts" : "tellonym_answers";
-  const { data } = await sb.from(table).select("account").limit(1000);
-  const names = [...new Set((data || []).map(r => r.account))].sort();
-  const sel = $("account");
-  const cur = sel.value;
-  sel.innerHTML = '<option value="">كل الحسابات</option>' + names.map(n => `<option value="${esc(n)}">@${esc(n)}</option>`).join("");
-  sel.value = names.includes(cur) ? cur : "";
+async function openTab(t) {
+  tab = t;
+  $("tab-tiktok").classList.toggle("on", t === "tiktok");
+  $("tab-tellonym").classList.toggle("on", t === "tellonym");
+  $("selmode").hidden = t !== "tiktok";
+  setSelMode(false);
+  // الحسابات: من الإعدادات (تبقى ظاهرة حتى لو فارغة) + أي حساب له بيانات
+  const fromCfg = (cfg[t] || []).map(x => x.replace(/^@/, ""));
+  const { data } = await sb.from(tableOf()).select("account").limit(1000);
+  const names = [...new Set([...fromCfg, ...(data || []).map(r => r.account)])];
+  const saved = names.includes(account) ? account : names[0] || "";
+  account = saved;
+  $("chips").innerHTML = names.map(n => `<button data-a="${esc(n)}" class="${n === account ? "on" : ""}">@${esc(n)}</button>`).join("");
+  $("chips").querySelectorAll("button").forEach(b => b.onclick = () => {
+    account = b.dataset.a;
+    $("chips").querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b));
+    setSelMode(false);
+    load(true);
+  });
+  load(true);
 }
 
 async function load(reset) {
   if (reset) { page = 0; $("list").innerHTML = ""; }
-  const table = tab === "tiktok" ? "tiktok_posts" : "tellonym_answers";
-  let query = sb.from(table).select("*", { count: "exact" })
+  let query = sb.from(tableOf()).select("*", { count: "exact" })
     .order("posted_at", { ascending: false, nullsFirst: false })
     .range(page * PAGE, page * PAGE + PAGE - 1);
-  const acc = $("account").value;
-  if (acc) query = query.eq("account", acc);
+  if (account) query = query.eq("account", account);
   const q = $("search").value.trim().replace(/[,()%*]/g, " ");
   if (q) query = tab === "tiktok" ? query.ilike("caption", `%${q}%`) : query.or(`tell.ilike.%${q}%,answer.ilike.%${q}%`);
 
@@ -165,7 +182,7 @@ async function load(reset) {
   $("count").textContent = `${count ?? 0} عنصر`;
   $("more").hidden = (page + 1) * PAGE >= (count ?? 0);
 
-  if (!data.length && reset) { $("list").innerHTML = '<div class="empty">لا توجد نتائج بعد</div>'; return; }
+  if (!data.length && reset) { $("list").innerHTML = '<div class="empty">لا توجد منشورات محفوظة لهذا الحساب بعد</div>'; return; }
   tab === "tiktok" ? await renderTikTok(data, reset) : renderTellonym(data);
 }
 
@@ -182,9 +199,15 @@ async function renderTikTok(rows, reset) {
     const el = document.createElement("div");
     el.className = "post";
     const img = urls[r.thumb_path] ? `style="background-image:url('${urls[r.thumb_path]}')"` : "";
-    el.innerHTML = `<div class="img" ${img}></div>
+    const n = (r.info && r.info.images && r.info.images.length) || 0;
+    el.innerHTML = `${n ? `<div class="badge">🖼 ${n}</div>` : ""}<div class="img" ${img}></div>
       <div class="meta"><div class="cap">${esc(r.caption || "بدون وصف")}</div>@${esc(r.account)} · ${fmtDate(r.posted_at)}</div>`;
-    el.onclick = () => play(r);
+    el.onclick = () => {
+      if (!selMode) return openPost(r);
+      if (selected.has(r.id)) { selected.delete(r.id); el.classList.remove("sel"); }
+      else { selected.set(r.id, r); el.classList.add("sel"); }
+      $("delsel").textContent = `حذف المحدد (${selected.size})`;
+    };
     grid.appendChild(el);
   }
 }
@@ -195,26 +218,83 @@ function renderTellonym(rows) {
     const el = document.createElement("div");
     el.className = "tell";
     el.innerHTML = `<div class="q">${esc(r.tell)}</div><div class="a">${esc(r.answer)}</div>
-      <div class="d">@${esc(r.account)} · ${fmtDate(r.posted_at)}</div>`;
+      <div class="d">@${esc(r.account)} · ${fmtDate(r.posted_at)} · <a href="#" class="rm" style="color:#ff6b6b">حذف</a></div>`;
+    el.querySelector(".rm").onclick = async e => {
+      e.preventDefault();
+      if (!confirm("حذف هذا العنصر نهائياً؟")) return;
+      await removeRows([r]);
+      el.remove();
+    };
     box.appendChild(el);
   }
 }
 
-async function play(r) {
-  if (!r.video_path) return;
-  const [{ data: v }, { data: d }] = await Promise.all([
-    sb.storage.from("archive").createSignedUrl(r.video_path, 3600),
-    sb.storage.from("archive").createSignedUrl(r.video_path, 3600, { download: true }),
-  ]);
-  if (!v) return;
-  $("player").src = v.signedUrl;
-  $("dl").href = d ? d.signedUrl : v.signedUrl;
-  $("modal").hidden = false;
-  $("player").play().catch(() => {});
+// ===== الحذف =====
+function setSelMode(on) {
+  selMode = on; selected.clear();
+  $("selmode").textContent = on ? "إلغاء التحديد" : "تحديد للحذف";
+  $("delsel").hidden = !on;
+  $("delsel").textContent = "حذف المحدد (0)";
+  document.querySelectorAll(".post.sel").forEach(e => e.classList.remove("sel"));
 }
-function closeModal() { $("player").pause(); $("player").removeAttribute("src"); $("modal").hidden = true; }
+$("selmode").onclick = () => setSelMode(!selMode);
+$("delsel").onclick = async () => {
+  if (!selected.size) return;
+  if (!confirm(`حذف ${selected.size} منشور نهائياً من قاعدة البيانات؟`)) return;
+  await removeRows([...selected.values()]);
+  setSelMode(false);
+  load(true);
+};
+
+async function removeRows(rows) {
+  const table = tableOf();
+  if (table === "tiktok_posts") {
+    const files = rows.flatMap(r => [r.video_path, r.thumb_path, ...((r.info && r.info.images) || [])]).filter(Boolean);
+    if (files.length) await sb.storage.from("archive").remove([...new Set(files)]);
+    // نتذكّر المحذوف حتى لا تحفظه الأداة مرة أخرى
+    await sb.from("deleted_posts").upsert(rows.map(r => ({ id: r.id, account: r.account })));
+  }
+  const { error } = await sb.from(table).delete().in("id", rows.map(r => r.id));
+  if (error) alert("تعذر الحذف. تأكد من تنفيذ ملف التحديث في Supabase.");
+}
+
+// ===== العرض =====
+let current = null;
+async function openPost(r) {
+  current = r;
+  $("mcap").textContent = r.caption || "";
+  const imgs = (r.info && r.info.images) || [];
+  $("player").hidden = !r.video_path;
+  $("photos").hidden = !imgs.length;
+  $("photos").innerHTML = "";
+  if (r.video_path) {
+    const [{ data: v }, { data: d }] = await Promise.all([
+      sb.storage.from("archive").createSignedUrl(r.video_path, 3600),
+      sb.storage.from("archive").createSignedUrl(r.video_path, 3600, { download: true }),
+    ]);
+    if (!v) return;
+    $("player").src = v.signedUrl;
+    $("dl").href = d ? d.signedUrl : v.signedUrl;
+    $("dl").hidden = false;
+    $("modal").hidden = false;
+    $("player").play().catch(() => {});
+  } else if (imgs.length) {
+    const { data } = await sb.storage.from("archive").createSignedUrls(imgs, 3600);
+    (data || []).forEach(x => { if (x.signedUrl) { const i = document.createElement("img"); i.src = x.signedUrl; $("photos").appendChild(i); } });
+    $("dl").hidden = true;
+    $("modal").hidden = false;
+  }
+}
+function closeModal() { $("player").pause(); $("player").removeAttribute("src"); $("modal").hidden = true; current = null; }
 $("close").onclick = closeModal;
 $("modal").onclick = e => { if (e.target.id === "modal") closeModal(); };
+$("del").onclick = async () => {
+  if (!current || !confirm("حذف هذا المنشور نهائياً؟")) return;
+  const r = current;
+  closeModal();
+  await removeRows([r]);
+  load(true);
+};
 
 init();
 </script>

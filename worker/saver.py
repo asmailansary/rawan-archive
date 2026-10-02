@@ -29,6 +29,7 @@ BUCKET = "archive"
 COOKIES = os.environ.get("TIKTOK_COOKIES_FILE")
 APIFY_TOKEN = os.environ.get("APIFY_TOKEN", "")
 APIFY_ACTOR = "clockworks~tiktok-profile-scraper"
+APIFY_ITEMS = {}   # id -> بيانات المنشور كما أرجعتها Apify (تُستخدم لمنشورات الصور)
 RESULTS = 5     # عدد أحدث المنشورات التي تُطلب من Apify لكل حساب في كل تشغيل
 H = {"apikey": SB_KEY}
 if not SB_KEY.startswith("sb_"):  # المفاتيح القديمة (JWT) تُرسل أيضاً في Authorization
@@ -126,7 +127,8 @@ def list_tiktok_ids_apify(user: str, limit: int):
             json={"profiles": [user], "resultsPerPage": limit,
                   "profileScrapeSections": ["videos"], "profileSorting": "latest",
                   "excludePinnedPosts": False,
-                  "shouldDownloadVideos": False, "shouldDownloadCovers": False},
+                  "shouldDownloadVideos": False, "shouldDownloadCovers": False,
+                  "shouldDownloadSlideshowImages": True},
             timeout=330,
         )
         if r.status_code >= 400:
@@ -140,6 +142,7 @@ def list_tiktok_ids_apify(user: str, limit: int):
         vid = str(it.get("id") or "")
         if vid.isdigit() and (not author or author == user.lower()):
             ids.append(vid)
+            APIFY_ITEMS[vid] = it
     ids = sorted(set(ids), key=int, reverse=True)
     if ids:
         return ids, ""
@@ -267,6 +270,65 @@ def cleanup_foreign(user: str) -> None:
     note("notice", f"Cleanup @{user}", f"removed {len(bad)} wrongly attributed videos")
 
 
+def _image_urls(item: dict) -> list:
+    """يستخرج روابط صور منشور الصور (Slideshow) من بيانات Apify."""
+    found = []
+
+    def walk(o, path):
+        low = path.lower()
+        if any(x in low for x in ("authormeta", "musicmeta", "avatar", "cover", "hashtag", "mention")):
+            return
+        if isinstance(o, dict):
+            for k, v in o.items():
+                walk(v, f"{path}.{k}")
+        elif isinstance(o, list):
+            for v in o:
+                walk(v, path)
+        elif isinstance(o, str) and o.startswith("http"):
+            if any(x in low for x in ("image", "slideshow", "photo")) and o not in found:
+                found.append(o)
+
+    walk(item, "")
+    return found
+
+
+def save_photo_post(user: str, vid: str, tmp: Path):
+    """يحفظ منشور صور: يحمّل الصور ويرفعها. يرجع True عند النجاح."""
+    global saved
+    item = APIFY_ITEMS.get(vid)
+    if not item:
+        return False
+    urls = _image_urls(item)
+    if not urls:
+        note("notice", f"Photo {vid} keys", f"keys={list(item.keys())}")
+        return False
+    paths = []
+    for n, u in enumerate(urls, 1):
+        r = requests.get(u, headers={"User-Agent": "Mozilla/5.0", "Referer": "https://www.tiktok.com/"}, timeout=120)
+        if r.status_code != 200 or len(r.content) < 500:
+            continue
+        ct = r.headers.get("content-type", "")
+        ext = ".png" if "png" in ct else ".webp" if "webp" in ct else ".jpg"
+        f = tmp / f"{vid}_{n}{ext}"
+        f.write_bytes(r.content)
+        paths.append(upload(f, f"tiktok/{user}/{vid}_{n}{ext}"))
+    if not paths:
+        return False
+    posted = item.get("createTimeISO")
+    if not posted and item.get("createTime"):
+        posted = datetime.fromtimestamp(int(item["createTime"]), tz=timezone.utc).isoformat()
+    insert("tiktok_posts", [{
+        "id": vid, "account": user, "caption": item.get("text"), "posted_at": posted,
+        "video_path": None, "thumb_path": paths[0],
+        "info": {"type": "photo", "images": paths,
+                 "like_count": item.get("diggCount"), "view_count": item.get("playCount"),
+                 "comment_count": item.get("commentCount"), "webpage_url": item.get("webVideoUrl")},
+    }])
+    log(f"[تيك توك] حُفظ منشور صور {vid} ({len(paths)} صورة)")
+    saved += 1
+    return True
+
+
 def sync_tiktok(user: str, cap: int) -> None:
     global errors, warnings, saved, skipped, nofile
     user = user.lstrip("@")
@@ -296,6 +358,10 @@ def sync_tiktok(user: str, cap: int) -> None:
         note("warning", f"TikTok @{user}", err)
         return
     known = existing_ids("tiktok_posts", user)
+    try:
+        known |= existing_ids("deleted_posts", user)   # ما حذفتَه يدوياً لا يُحفظ ثانيةً
+    except Exception:  # noqa: BLE001
+        pass
     todo = [i for i in ids if i not in known]
     log(f"[تيك توك] @{user}: {len(ids)} منشور، الجديد {len(todo)}، سيُحفظ {min(len(todo), cap)} الآن")
 
@@ -328,6 +394,8 @@ def sync_tiktok(user: str, cap: int) -> None:
             video = next((f for f in files if f.suffix.lower() in (".mp4", ".webm", ".mov", ".mkv")), None)
             thumb = next((f for f in files if f.suffix.lower() in (".jpg", ".jpeg", ".webp", ".png")), None)
             if not video:
+                if save_photo_post(user, vid, tmp):
+                    continue
                 # غالباً منشور صور (Slideshow) بلا ملف فيديو
                 log(f"[تيك توك] تخطي {vid}: لا يوجد ملف فيديو (منشور صور؟)")
                 nofile += 1
@@ -352,6 +420,11 @@ def sync_tiktok(user: str, cap: int) -> None:
             log(f"[تيك توك] حُفظ {vid}")
             saved += 1
         except Exception as e:  # noqa: BLE001
+            try:
+                if save_photo_post(user, vid, tmp):
+                    continue
+            except Exception as e2:  # noqa: BLE001
+                e = f"{e} | photo: {e2}"
             errors += 1
             log(f"[تيك توك] فشل {vid}: {e}")
             note("error", f"TikTok {vid}", e)
