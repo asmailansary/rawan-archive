@@ -34,6 +34,8 @@ if not SB_KEY.startswith("sb_"):  # المفاتيح القديمة (JWT) تُر
 errors = 0      # أخطاء حقيقية: تجعل التشغيل يظهر ❌
 warnings = 0    # تنبيهات: حساب بلا منشورات، أو موقع يحجب GitHub
 saved = 0       # عدد الفيديوهات المحفوظة في هذا التشغيل
+skipped = 0     # فيديوهات تم تخطيها لأنها ليست لهذا الحساب
+nofile = 0      # منشورات بلا ملف فيديو (صور)
 
 
 def log(msg: str) -> None:
@@ -121,10 +123,12 @@ def list_tiktok_ids_browser(user: str):
             api_ids = set()
 
             def on_response(resp):
-                if "item_list" in resp.url:
+                # فقط منشورات الملف الشخصي، لا قائمة "الموصى بها"
+                if "/api/post/item_list" in resp.url:
                     try:
                         for it in (resp.json().get("itemList") or []):
-                            if it.get("id"):
+                            au = ((it.get("author") or {}).get("uniqueId") or "").lower()
+                            if it.get("id") and (not au or au == user.lower()):
                                 api_ids.add(str(it["id"]))
                     except Exception:  # noqa: BLE001
                         pass
@@ -137,7 +141,8 @@ def list_tiktok_ids_browser(user: str):
                 page.mouse.wheel(0, 5000)
                 page.wait_for_timeout(1500)
             hrefs = page.eval_on_selector_all('a[href*="/video/"]', "els => els.map(e => e.href)")
-            dom_ids = {m.group(1) for h in hrefs for m in [re.search(r"/video/(\d+)", h)] if m}
+            dom_ids = {m.group(1) for h in hrefs
+                       for m in [re.search(rf"/@{re.escape(user)}/video/(\d+)", h, re.I)] if m}
             body = " ".join((page.inner_text("body") or "").split())[:160]
             browser.close()
         ids = sorted(api_ids | dom_ids, key=int, reverse=True)  # الأحدث أولاً
@@ -146,10 +151,52 @@ def list_tiktok_ids_browser(user: str):
         return [], f"browser error: {e}"
 
 
+def cleanup_foreign(user: str) -> None:
+    """يحذف سجلات سبق حفظها خطأً: فيديوهات يملكها حساب آخر لكن نُسبت لهذا الحساب."""
+    bad, offset = [], 0
+    while True:
+        r = requests.get(
+            f"{SB_URL}/rest/v1/tiktok_posts",
+            headers=H,
+            params={"select": "id,video_path,thumb_path,info", "account": f"eq.{user}",
+                    "limit": 1000, "offset": offset},
+            timeout=60,
+        )
+        r.raise_for_status()
+        rows = r.json()
+        for row in rows:
+            wp = (row.get("info") or {}).get("webpage_url") or ""
+            m = re.search(r"/@([^/]+)/video/", wp)
+            if m and m.group(1).lower() != user.lower():
+                bad.append(row)
+        if len(rows) < 1000:
+            break
+        offset += 1000
+    if not bad:
+        return
+    for k in range(0, len(bad), 50):
+        chunk = bad[k:k + 50]
+        paths = [p for row in chunk for p in (row.get("video_path"), row.get("thumb_path")) if p]
+        if paths:
+            requests.delete(f"{SB_URL}/storage/v1/object/{BUCKET}",
+                            headers={**H, "Content-Type": "application/json"},
+                            data=json.dumps({"prefixes": paths}), timeout=120).raise_for_status()
+        ids = ",".join(row["id"] for row in chunk)
+        requests.delete(f"{SB_URL}/rest/v1/tiktok_posts", headers={**H, "Prefer": "return=minimal"},
+                        params={"id": f"in.({ids})"}, timeout=60).raise_for_status()
+    log(f"[تيك توك] نُظّف {len(bad)} سجل خاطئ كان منسوباً لـ @{user}")
+    note("notice", f"Cleanup @{user}", f"removed {len(bad)} wrongly attributed videos")
+
+
 def sync_tiktok(user: str, cap: int) -> None:
-    global errors, warnings, saved
+    global errors, warnings, saved, skipped, nofile
     user = user.lstrip("@")
     log(f"[تيك توك] فحص @{user}")
+    try:
+        cleanup_foreign(user)
+    except Exception as e:  # noqa: BLE001
+        log(f"[تيك توك] تعذّر التنظيف: {e}")
+        note("warning", f"Cleanup @{user}", e)
     ids, err = list_tiktok_ids(user)
     if not ids:
         log(f"[تيك توك] yt-dlp لم يجد منشورات لـ @{user}: {err}. أجرّب المتصفح...")
@@ -182,11 +229,23 @@ def sync_tiktok(user: str, cap: int) -> None:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(f"https://www.tiktok.com/@{user}/video/{vid}", download=True)
 
+            # حماية: لا نحفظ إلا فيديو يملكه هذا الحساب فعلاً
+            owner = info.get("uploader") or ""
+            if not owner:
+                m = re.search(r"/@([^/]+)/video/", info.get("webpage_url") or "")
+                owner = m.group(1) if m else ""
+            if owner and owner.lower() != user.lower():
+                log(f"[تيك توك] تخطي {vid}: يملكه @{owner} وليس @{user}")
+                skipped += 1
+                continue
             files = list(tmp.glob(f"{vid}.*"))
             video = next((f for f in files if f.suffix.lower() in (".mp4", ".webm", ".mov", ".mkv")), None)
             thumb = next((f for f in files if f.suffix.lower() in (".jpg", ".jpeg", ".webp", ".png")), None)
             if not video:
-                raise RuntimeError("ملف الفيديو غير موجود بعد التحميل")
+                # غالباً منشور صور (Slideshow) بلا ملف فيديو
+                log(f"[تيك توك] تخطي {vid}: لا يوجد ملف فيديو (منشور صور؟)")
+                nofile += 1
+                continue
 
             vpath = upload(video, f"tiktok/{user}/{vid}{video.suffix.lower()}")
             tpath = upload(thumb, f"tiktok/{user}/{vid}{thumb.suffix.lower()}") if thumb else None
@@ -194,7 +253,7 @@ def sync_tiktok(user: str, cap: int) -> None:
             ts = info.get("timestamp")
             posted = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat() if ts else None
             keep = ("view_count", "like_count", "comment_count", "repost_count",
-                    "duration", "webpage_url", "track", "artist")
+                    "duration", "webpage_url", "uploader", "track", "artist")
             insert("tiktok_posts", [{
                 "id": vid,
                 "account": user,
@@ -301,7 +360,7 @@ def main() -> None:
             log(f"[تيلونيم] خطأ في {u}: {e}")
 
     log(f"انتهى. محفوظ: {saved}، أخطاء: {errors}، تنبيهات: {warnings}")
-    note("notice", "Summary", f"saved={saved} errors={errors} warnings={warnings}")
+    note("notice", "Summary", f"saved={saved} skipped_foreign={skipped} no_video_file={nofile} errors={errors} warnings={warnings}")
     sys.exit(1 if errors else 0)
 
 
