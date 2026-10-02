@@ -58,12 +58,6 @@ jobs:
         if: steps.guard.outputs.recent == '' || steps.guard.outputs.recent == '0'
         run: pip install -U "yt-dlp[default,curl-cffi]" requests
 
-      - name: Install browser (for Tellonym)
-        if: steps.guard.outputs.recent == '' || steps.guard.outputs.recent == '0'
-        run: |
-          pip install playwright
-          playwright install --with-deps chromium
-
       - name: Prepare TikTok cookies (optional)
         if: steps.guard.outputs.recent == '' || steps.guard.outputs.recent == '0'
         env:
