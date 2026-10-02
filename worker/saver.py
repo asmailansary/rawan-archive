@@ -443,16 +443,43 @@ T_HEADERS = {
 }
 
 
+def _tget(url: str, params=None):
+    """طلب GET يحاكي متصفح Chrome الحقيقي (بصمة TLS) لتجاوز الحجب البسيط."""
+    try:
+        from curl_cffi import requests as cr
+        return cr.get(url, headers={"Accept": "application/json", "tellonym-client": "web:1.0.0"},
+                      params=params, impersonate="chrome", timeout=30)
+    except ImportError:
+        return requests.get(url, headers=T_HEADERS, params=params, timeout=30)
+
+
 def fetch_tellonym(name: str, limit: int = 25) -> list:
+    tried = []
+    # الطريقة 1: slug -> id -> answers (كما في كود المستخدم)  |  الطريقة 2: profiles/name
+    uid = None
+    r = _tget(f"https://api.tellonym.me/accounts/slug/{quote(name)}")
+    tried.append(f"slug={r.status_code}")
+    if r.status_code == 200:
+        try:
+            uid = r.json().get("id")
+        except Exception:  # noqa: BLE001
+            pass
+    if uid:
+        base, extra = f"https://api.tellonym.me/answers/id/{uid}", {}
+    else:
+        base, extra = TELLONYM_API.format(name=quote(name)), {}
     items, pos = [], 0
     while True:
-        r = requests.get(
-            TELLONYM_API.format(name=quote(name)),
-            headers=T_HEADERS,
-            params={"limit": limit, "pos": pos},
-            timeout=30,
-        )
-        r.raise_for_status()
+        r = _tget(base, {"limit": limit, "pos": pos, **extra})
+        tried.append(f"{'answers' if uid else 'profile'}={r.status_code}")
+        if r.status_code != 200:
+            note("notice", "Tellonym probe", f"{' '.join(tried)} body={r.text[:150]}")
+            if not items and uid:   # جرّب الطريقة الأخرى
+                uid = None
+                base = TELLONYM_API.format(name=quote(name))
+                continue
+            r.raise_for_status() if hasattr(r, "raise_for_status") else None
+            break
         batch = r.json().get("answers") or []
         if not batch:
             break
@@ -461,6 +488,7 @@ def fetch_tellonym(name: str, limit: int = 25) -> list:
             break
         pos += len(batch)
         time.sleep(1.5)
+    note("notice", "Tellonym probe", " ".join(tried))
     return items
 
 
@@ -470,8 +498,8 @@ def sync_tellonym(name: str) -> None:
     log(f"[تيلونيم] فحص {name}")
     try:
         items = fetch_tellonym(name)
-    except requests.HTTPError as e:
-        code = e.response.status_code if e.response is not None else "?"
+    except Exception as e:  # noqa: BLE001
+        code = getattr(getattr(e, "response", None), "status_code", "?")
         if code == 403:
             warnings += 1
             log("[تيلونيم] تنبيه: الموقع رفض الطلب (403)، غالباً يحجب عناوين GitHub. تم التخطي.")
