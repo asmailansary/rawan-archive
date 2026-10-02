@@ -56,6 +56,9 @@ def errors_add(e) -> None:
 def note(level: str, title: str, msg) -> None:
     """يكتب رسالة تظهر ضمن تنبيهات التشغيل في GitHub (level: notice | warning | error)."""
     text = " ".join(str(msg).split())[:900]
+    if level == "notice" and (title.startswith("Tellonym") or "browser" in title):
+        print(f"[{title}] {text}", flush=True)   # تفاصيل تشخيص قديمة: سجل عادي حتى لا تزاحم التنبيهات (حد GitHub 10)
+        return
     print(f"::{level} title={title}::{text}", flush=True)
 
 
