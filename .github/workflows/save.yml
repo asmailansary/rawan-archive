@@ -37,6 +37,6 @@ jobs:
 
       - name: Save new posts
         env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_URL: https://amfkhunxocjmmmumrftr.supabase.co
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
         run: python worker/saver.py
