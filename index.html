@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>أرشيفي</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<style>
+  :root { --bg:#0f1115; --card:#181b22; --line:#262a33; --text:#e8eaf0; --mute:#8b92a3; --acc:#4f8cff; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font-family:system-ui,-apple-system,"Segoe UI",Tahoma,sans-serif; }
+  [hidden] { display:none !important; }
+  .wrap { max-width:1000px; margin:0 auto; padding:16px; }
+  h1 { font-size:20px; margin:0; }
+  header { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:14px; }
+  input, select, button { font:inherit; color:var(--text); background:var(--card); border:1px solid var(--line); border-radius:10px; padding:10px 12px; }
+  button { cursor:pointer; }
+  button.primary { background:var(--acc); border-color:var(--acc); color:#fff; }
+  .tabs { display:flex; gap:8px; margin-bottom:12px; }
+  .tabs button.on { background:var(--acc); border-color:var(--acc); color:#fff; }
+  .filters { display:flex; gap:8px; margin-bottom:14px; flex-wrap:wrap; }
+  .filters input { flex:1; min-width:150px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:10px; }
+  .post { background:var(--card); border:1px solid var(--line); border-radius:12px; overflow:hidden; cursor:pointer; }
+  .post .img { aspect-ratio:9/16; background:#000 center/cover no-repeat; }
+  .post .meta { padding:8px; font-size:12px; color:var(--mute); }
+  .post .cap { color:var(--text); display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; margin-bottom:4px; }
+  .tell { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px; margin-bottom:10px; }
+  .tell .q { color:var(--mute); margin-bottom:8px; white-space:pre-wrap; }
+  .tell .a { white-space:pre-wrap; }
+  .tell .d { font-size:12px; color:var(--mute); margin-top:8px; }
+  .more { display:block; margin:16px auto; }
+  .empty, #count { color:var(--mute); text-align:center; padding:18px; }
+  #login { max-width:340px; margin:18vh auto 0; padding:16px; display:flex; flex-direction:column; gap:10px; }
+  #err { color:#ff6b6b; min-height:1.2em; font-size:14px; }
+  #modal { position:fixed; inset:0; background:rgba(0,0,0,.85); display:flex; flex-direction:column; align-items:center; justify-content:center; gap:10px; padding:12px; z-index:10; }
+  #modal video { max-width:100%; max-height:78vh; border-radius:12px; background:#000; }
+  #modal .row { display:flex; gap:8px; }
+  #modal a { text-decoration:none; color:var(--text); background:var(--card); border:1px solid var(--line); border-radius:10px; padding:10px 14px; }
+</style>
+</head>
+<body>
+
+<form id="login" hidden>
+  <h1>أرشيفي — تسجيل الدخول</h1>
+  <input id="email" type="email" placeholder="البريد الإلكتروني" autocomplete="username" required>
+  <input id="pass" type="password" placeholder="كلمة المرور" autocomplete="current-password" required>
+  <div id="err"></div>
+  <button class="primary" type="submit">دخول</button>
+</form>
+
+<div id="app" class="wrap" hidden>
+  <header>
+    <h1>أرشيفي</h1>
+    <button id="logout">خروج</button>
+  </header>
+  <div class="tabs">
+    <button id="tab-tiktok" class="on">تيك توك</button>
+    <button id="tab-tellonym">تيلونيم</button>
+  </div>
+  <div class="filters">
+    <select id="account"><option value="">كل الحسابات</option></select>
+    <input id="search" type="search" placeholder="بحث...">
+  </div>
+  <div id="count"></div>
+  <div id="list"></div>
+  <button id="more" class="more" hidden>عرض المزيد</button>
+</div>
+
+<div id="modal" hidden>
+  <video id="player" controls playsinline></video>
+  <div class="row"><a id="dl" href="#" download>تحميل</a><button id="close">إغلاق</button></div>
+</div>
+
+<script>
+// ===== عدّل هذين السطرين فقط (Supabase → Project Settings → API) =====
+const SUPABASE_URL = "PUT_YOUR_SUPABASE_URL_HERE";
+const SUPABASE_ANON_KEY = "PUT_YOUR_ANON_PUBLIC_KEY_HERE";
+// =====================================================================
+
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+const $ = id => document.getElementById(id);
+const PAGE = 24;
+let tab = "tiktok", page = 0, timer;
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+function fmtDate(d) {
+  return d ? new Date(d).toLocaleString("ar-SA", { dateStyle: "medium", timeStyle: "short" }) : "";
+}
+
+async function init() {
+  const { data: { session } } = await sb.auth.getSession();
+  show(!!session);
+}
+function show(ok) {
+  $("login").hidden = ok;
+  $("app").hidden = !ok;
+  if (ok) { loadAccounts(); load(true); }
+}
+
+$("login").onsubmit = async e => {
+  e.preventDefault();
+  $("err").textContent = "";
+  const { error } = await sb.auth.signInWithPassword({ email: $("email").value, password: $("pass").value });
+  if (error) $("err").textContent = "بيانات الدخول غير صحيحة";
+  else show(true);
+};
+$("logout").onclick = async () => { await sb.auth.signOut(); show(false); };
+
+function setTab(t) {
+  tab = t;
+  $("tab-tiktok").classList.toggle("on", t === "tiktok");
+  $("tab-tellonym").classList.toggle("on", t === "tellonym");
+  $("account").value = "";
+  loadAccounts();
+  load(true);
+}
+$("tab-tiktok").onclick = () => setTab("tiktok");
+$("tab-tellonym").onclick = () => setTab("tellonym");
+$("account").onchange = () => load(true);
+$("search").oninput = () => { clearTimeout(timer); timer = setTimeout(() => load(true), 350); };
+$("more").onclick = () => { page++; load(false); };
+
+async function loadAccounts() {
+  const table = tab === "tiktok" ? "tiktok_posts" : "tellonym_answers";
+  const { data } = await sb.from(table).select("account").limit(1000);
+  const names = [...new Set((data || []).map(r => r.account))].sort();
+  const sel = $("account");
+  const cur = sel.value;
+  sel.innerHTML = '<option value="">كل الحسابات</option>' + names.map(n => `<option value="${esc(n)}">@${esc(n)}</option>`).join("");
+  sel.value = names.includes(cur) ? cur : "";
+}
+
+async function load(reset) {
+  if (reset) { page = 0; $("list").innerHTML = ""; }
+  const table = tab === "tiktok" ? "tiktok_posts" : "tellonym_answers";
+  let query = sb.from(table).select("*", { count: "exact" })
+    .order("posted_at", { ascending: false, nullsFirst: false })
+    .range(page * PAGE, page * PAGE + PAGE - 1);
+  const acc = $("account").value;
+  if (acc) query = query.eq("account", acc);
+  const q = $("search").value.trim().replace(/[,()%*]/g, " ");
+  if (q) query = tab === "tiktok" ? query.ilike("caption", `%${q}%`) : query.or(`tell.ilike.%${q}%,answer.ilike.%${q}%`);
+
+  const { data, count, error } = await query;
+  if (error) { $("count").textContent = "تعذر تحميل البيانات"; return; }
+  $("count").textContent = `${count ?? 0} عنصر`;
+  $("more").hidden = (page + 1) * PAGE >= (count ?? 0);
+
+  if (!data.length && reset) { $("list").innerHTML = '<div class="empty">لا توجد نتائج بعد</div>'; return; }
+  tab === "tiktok" ? await renderTikTok(data, reset) : renderTellonym(data);
+}
+
+async function renderTikTok(rows, reset) {
+  let grid = $("list").querySelector(".grid");
+  if (!grid || reset) { $("list").innerHTML = '<div class="grid"></div>'; grid = $("list").querySelector(".grid"); }
+  const paths = rows.map(r => r.thumb_path).filter(Boolean);
+  const urls = {};
+  if (paths.length) {
+    const { data } = await sb.storage.from("archive").createSignedUrls(paths, 3600);
+    (data || []).forEach(x => { if (x.signedUrl) urls[x.path] = x.signedUrl; });
+  }
+  for (const r of rows) {
+    const el = document.createElement("div");
+    el.className = "post";
+    const img = urls[r.thumb_path] ? `style="background-image:url('${urls[r.thumb_path]}')"` : "";
+    el.innerHTML = `<div class="img" ${img}></div>
+      <div class="meta"><div class="cap">${esc(r.caption || "بدون وصف")}</div>@${esc(r.account)} · ${fmtDate(r.posted_at)}</div>`;
+    el.onclick = () => play(r);
+    grid.appendChild(el);
+  }
+}
+
+function renderTellonym(rows) {
+  const box = $("list");
+  for (const r of rows) {
+    const el = document.createElement("div");
+    el.className = "tell";
+    el.innerHTML = `<div class="q">${esc(r.tell)}</div><div class="a">${esc(r.answer)}</div>
+      <div class="d">@${esc(r.account)} · ${fmtDate(r.posted_at)}</div>`;
+    box.appendChild(el);
+  }
+}
+
+async function play(r) {
+  if (!r.video_path) return;
+  const [{ data: v }, { data: d }] = await Promise.all([
+    sb.storage.from("archive").createSignedUrl(r.video_path, 3600),
+    sb.storage.from("archive").createSignedUrl(r.video_path, 3600, { download: true }),
+  ]);
+  if (!v) return;
+  $("player").src = v.signedUrl;
+  $("dl").href = d ? d.signedUrl : v.signedUrl;
+  $("modal").hidden = false;
+  $("player").play().catch(() => {});
+}
+function closeModal() { $("player").pause(); $("player").removeAttribute("src"); $("modal").hidden = true; }
+$("close").onclick = closeModal;
+$("modal").onclick = e => { if (e.target.id === "modal") closeModal(); };
+
+init();
+</script>
+</body>
+</html>
