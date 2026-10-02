@@ -359,6 +359,52 @@ def save_photo_post(user: str, vid: str, tmp: Path):
     return True
 
 
+def save_story(user: str, sid: str, tmp: Path) -> bool:
+    """يحفظ قصة (فيديو أو صور) من بيانات Apify."""
+    global saved
+    item = STORY_ITEMS.get(sid)
+    if not item:
+        return False
+    media = [u for u in (item.get("mediaUrls") or []) if isinstance(u, str) and u.startswith("http")]
+    media += [(x.get("downloadLink") or x.get("tiktokLink")) for x in (item.get("slideshowImageLinks") or []) if isinstance(x, dict)]
+    paths, video_path = [], None
+    for n, u in enumerate([m for m in media if m], 1):
+        r = requests.get(u, headers={"User-Agent": "Mozilla/5.0", "Referer": "https://www.tiktok.com/"}, timeout=300)
+        if r.status_code != 200 or len(r.content) < 1000:
+            continue
+        ct = r.headers.get("content-type", "")
+        ext = ".mp4" if "video" in ct or "mp4" in ct else ".png" if "png" in ct else ".webp" if "webp" in ct else ".jpg"
+        f = tmp / f"s{sid}_{n}{ext}"
+        f.write_bytes(r.content)
+        remote = upload(f, f"tiktok/{user}/story_{sid}_{n}{ext}")
+        if ext == ".mp4" and not video_path:
+            video_path = remote
+        else:
+            paths.append(remote)
+    if not video_path and not paths:
+        return False
+    thumb = paths[0] if paths else None
+    if video_path and not thumb:
+        cover = (item.get("videoMeta") or {}).get("coverUrl")
+        if cover:
+            try:
+                rc = requests.get(cover, timeout=60)
+                if rc.status_code == 200 and len(rc.content) > 500:
+                    f = tmp / f"s{sid}_cover.jpg"
+                    f.write_bytes(rc.content)
+                    thumb = upload(f, f"tiktok/{user}/story_{sid}_cover.jpg")
+            except Exception:  # noqa: BLE001
+                pass
+    insert("tiktok_posts", [{
+        "id": f"story_{sid}", "account": user, "caption": item.get("text") or "ستوري",
+        "posted_at": item.get("createTimeISO"), "video_path": video_path, "thumb_path": thumb,
+        "info": {"type": "story", "images": paths if not video_path else [], "webpage_url": item.get("webVideoUrl")},
+    }])
+    log(f"[تيك توك] حُفظت قصة {sid}")
+    saved += 1
+    return True
+
+
 def sync_tiktok(user: str, cap: int) -> None:
     global errors, warnings, saved, skipped, nofile
     user = user.lstrip("@")
@@ -370,7 +416,16 @@ def sync_tiktok(user: str, cap: int) -> None:
         note("warning", f"Cleanup @{user}", e)
     try:
         sids, sinfo = list_stories_apify(user) if APIFY_TOKEN else ([], "no token")
-        note("notice", f"Stories @{user}", sinfo)
+        note("notice", f"Stories @{user}", sinfo[:300])
+        have = existing_ids("tiktok_posts", user)
+        for sid in sids:
+            if f"story_{sid}" in have:
+                continue
+            tmp = Path(tempfile.mkdtemp())
+            try:
+                save_story(user, sid, tmp)
+            finally:
+                shutil.rmtree(tmp, ignore_errors=True)
     except Exception as e:  # noqa: BLE001
         note("notice", f"Stories @{user}", f"error {e}")
     ids, err = [], ""

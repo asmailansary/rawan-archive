@@ -200,7 +200,7 @@ async function renderTikTok(rows, reset) {
     el.className = "post";
     const img = urls[r.thumb_path] ? `style="background-image:url('${urls[r.thumb_path]}')"` : "";
     const n = (r.info && r.info.images && r.info.images.length) || 0;
-    el.innerHTML = `${n ? `<div class="badge">🖼 ${n}</div>` : ""}<div class="img" ${img}></div>
+    el.innerHTML = `${r.info && r.info.type === "story" ? `<div class="badge">ستوري</div>` : n ? `<div class="badge">🖼 ${n}</div>` : ""}<div class="img" ${img}></div>
       <div class="meta"><div class="cap">${esc(r.caption || "بدون وصف")}</div>@${esc(r.account)} · ${fmtDate(r.posted_at)}</div>`;
     el.onclick = () => {
       if (!selMode) return openPost(r);
