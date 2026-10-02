@@ -26,7 +26,9 @@ SB_URL = os.environ["SUPABASE_URL"].rstrip("/")
 SB_KEY = os.environ["SUPABASE_SERVICE_KEY"]
 BUCKET = "archive"
 COOKIES = os.environ.get("TIKTOK_COOKIES_FILE")
-H = {"apikey": SB_KEY, "Authorization": f"Bearer {SB_KEY}"}
+H = {"apikey": SB_KEY}
+if not SB_KEY.startswith("sb_"):  # المفاتيح القديمة (JWT) تُرسل أيضاً في Authorization
+    H["Authorization"] = f"Bearer {SB_KEY}"
 
 errors = 0
 
