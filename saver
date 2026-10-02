@@ -1,0 +1,237 @@
+#!/usr/bin/env python3
+"""
+العامل (Worker): يفحص حسابات تيك توك وتيلونيم، ويحفظ الجديد فقط في Supabase.
+يعمل تلقائياً عبر GitHub Actions (انظر .github/workflows/save.yml).
+
+المتغيرات المطلوبة:
+    SUPABASE_URL, SUPABASE_SERVICE_KEY
+اختياري:
+    TIKTOK_COOKIES_FILE  (مسار ملف cookies.txt)
+"""
+import json
+import mimetypes
+import os
+import shutil
+import sys
+import tempfile
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from urllib.parse import quote
+
+import requests
+import yt_dlp
+
+SB_URL = os.environ["SUPABASE_URL"].rstrip("/")
+SB_KEY = os.environ["SUPABASE_SERVICE_KEY"]
+BUCKET = "archive"
+COOKIES = os.environ.get("TIKTOK_COOKIES_FILE")
+H = {"apikey": SB_KEY, "Authorization": f"Bearer {SB_KEY}"}
+
+errors = 0
+
+
+def log(msg: str) -> None:
+    print(f"[{datetime.now():%H:%M:%S}] {msg}", flush=True)
+
+
+# ------------------------- Supabase -------------------------
+def existing_ids(table: str, account: str) -> set:
+    ids, offset = set(), 0
+    while True:
+        r = requests.get(
+            f"{SB_URL}/rest/v1/{table}",
+            headers=H,
+            params={"select": "id", "account": f"eq.{account}", "limit": 1000, "offset": offset},
+            timeout=60,
+        )
+        r.raise_for_status()
+        rows = r.json()
+        ids.update(x["id"] for x in rows)
+        if len(rows) < 1000:
+            return ids
+        offset += 1000
+
+
+def insert(table: str, rows: list) -> None:
+    if not rows:
+        return
+    r = requests.post(
+        f"{SB_URL}/rest/v1/{table}",
+        headers={**H, "Content-Type": "application/json",
+                 "Prefer": "resolution=ignore-duplicates,return=minimal"},
+        data=json.dumps(rows),
+        timeout=60,
+    )
+    r.raise_for_status()
+
+
+def upload(local: Path, remote: str) -> str:
+    ctype = mimetypes.guess_type(str(local))[0] or "application/octet-stream"
+    with open(local, "rb") as f:
+        r = requests.post(
+            f"{SB_URL}/storage/v1/object/{BUCKET}/{quote(remote)}",
+            headers={**H, "Content-Type": ctype, "x-upsert": "true"},
+            data=f,
+            timeout=900,
+        )
+    r.raise_for_status()
+    return remote
+
+
+# ------------------------- تيك توك -------------------------
+def list_tiktok_ids(user: str) -> list:
+    opts = {"extract_flat": True, "quiet": True, "ignoreerrors": True, "skip_download": True}
+    if COOKIES:
+        opts["cookiefile"] = COOKIES
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(f"https://www.tiktok.com/@{user}", download=False)
+    return [e["id"] for e in (info or {}).get("entries", []) if e and e.get("id")]
+
+
+def sync_tiktok(user: str, cap: int) -> None:
+    global errors
+    user = user.lstrip("@")
+    log(f"[تيك توك] فحص @{user}")
+    ids = list_tiktok_ids(user)
+    if not ids:
+        log(f"[تيك توك] لم يُرجع أي منشورات لـ @{user} (حجب أو حساب خاص؟ جرّب cookies)")
+        errors += 1
+        return
+    known = existing_ids("tiktok_posts", user)
+    todo = [i for i in ids if i not in known]
+    log(f"[تيك توك] @{user}: {len(ids)} منشور، الجديد {len(todo)}، سيُحفظ {min(len(todo), cap)} الآن")
+
+    for vid in todo[:cap]:
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            opts = {
+                "outtmpl": str(tmp / "%(id)s.%(ext)s"),
+                "writethumbnail": True,
+                "format": "best[ext=mp4]/best",
+                "quiet": True,
+                "no_warnings": True,
+                "retries": 5,
+            }
+            if COOKIES:
+                opts["cookiefile"] = COOKIES
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(f"https://www.tiktok.com/@{user}/video/{vid}", download=True)
+
+            files = list(tmp.glob(f"{vid}.*"))
+            video = next((f for f in files if f.suffix.lower() in (".mp4", ".webm", ".mov", ".mkv")), None)
+            thumb = next((f for f in files if f.suffix.lower() in (".jpg", ".jpeg", ".webp", ".png")), None)
+            if not video:
+                raise RuntimeError("ملف الفيديو غير موجود بعد التحميل")
+
+            vpath = upload(video, f"tiktok/{user}/{vid}{video.suffix.lower()}")
+            tpath = upload(thumb, f"tiktok/{user}/{vid}{thumb.suffix.lower()}") if thumb else None
+
+            ts = info.get("timestamp")
+            posted = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat() if ts else None
+            keep = ("view_count", "like_count", "comment_count", "repost_count",
+                    "duration", "webpage_url", "track", "artist")
+            insert("tiktok_posts", [{
+                "id": vid,
+                "account": user,
+                "caption": info.get("description") or info.get("title"),
+                "posted_at": posted,
+                "video_path": vpath,
+                "thumb_path": tpath,
+                "info": {k: info.get(k) for k in keep},
+            }])
+            log(f"[تيك توك] حُفظ {vid}")
+        except Exception as e:  # noqa: BLE001
+            errors += 1
+            log(f"[تيك توك] فشل {vid}: {e}")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+        time.sleep(3)
+
+
+# ------------------------- تيلونيم -------------------------
+TELLONYM_API = "https://api.tellonym.me/profiles/name/{name}"
+T_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+    "Accept": "application/json",
+    "tellonym-client": "web:1.0.0",
+}
+
+
+def fetch_tellonym(name: str, limit: int = 25) -> list:
+    items, pos = [], 0
+    while True:
+        r = requests.get(
+            TELLONYM_API.format(name=quote(name)),
+            headers=T_HEADERS,
+            params={"limit": limit, "pos": pos},
+            timeout=30,
+        )
+        r.raise_for_status()
+        batch = r.json().get("answers") or []
+        if not batch:
+            break
+        items.extend(batch)
+        if len(batch) < limit:
+            break
+        pos += len(batch)
+        time.sleep(1.5)
+    return items
+
+
+def sync_tellonym(name: str) -> None:
+    global errors
+    name = name.lstrip("@")
+    log(f"[تيلونيم] فحص {name}")
+    try:
+        items = fetch_tellonym(name)
+    except requests.HTTPError as e:
+        errors += 1
+        code = e.response.status_code if e.response is not None else "?"
+        log(f"[تيلونيم] فشل الطلب (HTTP {code}) — قد تكون الواجهة تغيّرت أو حجبت عناوين GitHub")
+        return
+
+    known = existing_ids("tellonym_answers", name)
+    rows = []
+    for i in items:
+        if str(i.get("id")) in known:
+            continue
+        rows.append({
+            "id": str(i.get("id")),
+            "account": name,
+            "tell": i.get("tell"),
+            "answer": i.get("answer"),
+            "posted_at": i.get("createdAt"),
+            "raw": i,
+        })
+    for k in range(0, len(rows), 200):
+        insert("tellonym_answers", rows[k:k + 200])
+    log(f"[تيلونيم] {name}: {len(rows)} جديد من أصل {len(items)}")
+
+
+# ------------------------- التشغيل -------------------------
+def main() -> None:
+    global errors
+    cfg = json.loads((Path(__file__).parent.parent / "config.json").read_text(encoding="utf-8"))
+    cap = int(cfg.get("max_new_videos_per_run", 20))
+
+    for u in cfg.get("tiktok", []):
+        try:
+            sync_tiktok(u, cap)
+        except Exception as e:  # noqa: BLE001
+            errors += 1
+            log(f"[تيك توك] خطأ في {u}: {e}")
+    for u in cfg.get("tellonym", []):
+        try:
+            sync_tellonym(u)
+        except Exception as e:  # noqa: BLE001
+            errors += 1
+            log(f"[تيلونيم] خطأ في {u}: {e}")
+
+    log(f"انتهى. عدد الأخطاء: {errors}")
+    sys.exit(1 if errors else 0)
+
+
+if __name__ == "__main__":
+    main()
