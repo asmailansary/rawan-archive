@@ -157,6 +157,36 @@ def list_tiktok_ids_apify(user: str, limit: int):
     return [], f"Apify أرجع {len(items) if isinstance(items, list) else '?'} عنصراً بلا منشورات صالحة. أول عنصر: {sample}"
 
 
+STORY_ITEMS = {}
+
+
+def list_stories_apify(user: str):
+    """يجلب القصص (Stories) النشطة للحساب عبر Apify. يرجع (قائمة معرّفات، رسالة تشخيص)."""
+    try:
+        r = requests.post(
+            f"https://api.apify.com/v2/acts/{APIFY_ACTOR}/run-sync-get-dataset-items",
+            params={"token": APIFY_TOKEN},
+            json={"profiles": [user], "resultsPerPage": 20, "profileScrapeSections": ["stories"],
+                  "shouldDownloadVideos": True, "shouldDownloadCovers": True},
+            timeout=330,
+        )
+        if r.status_code >= 400:
+            return [], f"HTTP {r.status_code}: {r.text[:200]}"
+        items = r.json()
+    except Exception as e:  # noqa: BLE001
+        return [], f"error {e}"
+    out = []
+    for it in items if isinstance(items, list) else []:
+        if isinstance(it, dict) and str(it.get("id") or "").isdigit():
+            STORY_ITEMS[str(it["id"])] = it
+            out.append(str(it["id"]))
+    if out:
+        first = STORY_ITEMS[out[0]]
+        return out, f"stories={len(out)} keys={list(first.keys())} sample={json.dumps({k: v for k, v in first.items() if k != 'authorMeta'}, ensure_ascii=False)[:700]}"
+    first = items[0] if isinstance(items, list) and items and isinstance(items[0], dict) else {}
+    return [], f"n={len(items) if isinstance(items, list) else '?'} keys={list(first.keys())} note={first.get('note')} sample={json.dumps({k: v for k, v in first.items() if k != 'authorMeta'}, ensure_ascii=False)[:500]}"
+
+
 def list_tiktok_ids_browser(user: str):
     """بديل عند فشل yt-dlp: متصفح حقيقي يفتح الملف الشخصي ويجمع معرّفات الفيديوهات."""
     try:
@@ -338,6 +368,11 @@ def sync_tiktok(user: str, cap: int) -> None:
     except Exception as e:  # noqa: BLE001
         log(f"[تيك توك] تعذّر التنظيف: {e}")
         note("warning", f"Cleanup @{user}", e)
+    try:
+        sids, sinfo = list_stories_apify(user) if APIFY_TOKEN else ([], "no token")
+        note("notice", f"Stories @{user}", sinfo)
+    except Exception as e:  # noqa: BLE001
+        note("notice", f"Stories @{user}", f"error {e}")
     ids, err = [], ""
     if APIFY_TOKEN:
         ids, err = list_tiktok_ids_apify(user, RESULTS)
