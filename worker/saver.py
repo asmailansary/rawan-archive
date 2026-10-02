@@ -124,6 +124,8 @@ def list_tiktok_ids_apify(user: str, limit: int):
             f"https://api.apify.com/v2/acts/{APIFY_ACTOR}/run-sync-get-dataset-items",
             params={"token": APIFY_TOKEN},
             json={"profiles": [user], "resultsPerPage": limit,
+                  "profileScrapeSections": ["videos"], "profileSorting": "latest",
+                  "excludePinnedPosts": False,
                   "shouldDownloadVideos": False, "shouldDownloadCovers": False},
             timeout=330,
         )
