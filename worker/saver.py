@@ -469,9 +469,9 @@ def tellonym_via_browser(name: str):
             page = ctx.new_page()
 
             def on_resp(resp):
-                if "api.tellonym.me" not in resp.url:
+                if "tellonym.me" not in resp.url:
                     return
-                seen.append(f"{resp.status} {resp.url.split('tellonym.me')[-1][:60]}")
+                seen.append(f"{resp.status} {resp.url[8:70]}")
                 try:
                     data = resp.json()
                 except Exception:  # noqa: BLE001
@@ -481,7 +481,9 @@ def tellonym_via_browser(name: str):
                         got[str(a["id"])] = a
 
             page.on("response", on_resp)
-            page.goto(f"https://tellonym.me/{name}", wait_until="networkidle", timeout=60000)
+            page.goto(f"https://tellonym.me/{name}", wait_until="domcontentloaded", timeout=60000)
+            page.wait_for_timeout(15000)
+            seen.append("title=" + page.title()[:60] + " text=" + " ".join(page.inner_text("body").split())[:200])
             last = -1
             for _ in range(60):                      # تمرير الصفحة لتحميل الأقدم
                 page.mouse.wheel(0, 4000)
@@ -491,8 +493,8 @@ def tellonym_via_browser(name: str):
                 last = len(got)
             browser.close()
     except Exception as e:  # noqa: BLE001
-        return list(got.values()), f"browser error: {e} | seen={seen[:8]}"
-    return list(got.values()), f"seen={seen[:8]}"
+        return list(got.values()), f"browser error: {e} | seen={seen[:12]}"
+    return list(got.values()), f"seen={seen[:12]}"
 
 
 def fetch_tellonym(name: str, limit: int = 25) -> list:
