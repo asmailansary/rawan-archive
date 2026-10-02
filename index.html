@@ -49,6 +49,12 @@
   <button class="primary" type="submit">دخول</button>
 </form>
 
+<div id="setup" class="wrap empty" hidden>
+  <h1>أرشيفي</h1>
+  <p>الصفحة تعمل، لكن لم يتم ربطها بـ Supabase بعد.</p>
+  <p>عدّل السطرين <code>SUPABASE_URL</code> و <code>SUPABASE_ANON_KEY</code> في أعلى كود الصفحة.</p>
+</div>
+
 <div id="app" class="wrap" hidden>
   <header>
     <h1>أرشيفي</h1>
@@ -78,8 +84,12 @@ const SUPABASE_URL = "PUT_YOUR_SUPABASE_URL_HERE";
 const SUPABASE_ANON_KEY = "PUT_YOUR_ANON_PUBLIC_KEY_HERE";
 // =====================================================================
 
-const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 const $ = id => document.getElementById(id);
+let sb = null;
+try {
+  const ready = !SUPABASE_URL.startsWith("PUT_") && !SUPABASE_ANON_KEY.startsWith("PUT_");
+  if (ready && typeof supabase !== "undefined") sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+} catch (e) { console.error(e); }
 const PAGE = 24;
 let tab = "tiktok", page = 0, timer;
 
@@ -91,8 +101,14 @@ function fmtDate(d) {
 }
 
 async function init() {
-  const { data: { session } } = await sb.auth.getSession();
-  show(!!session);
+  if (!sb) { $("setup").hidden = false; return; }
+  try {
+    const { data: { session } } = await sb.auth.getSession();
+    show(!!session);
+  } catch (e) {
+    console.error(e);
+    show(false);
+  }
 }
 function show(ok) {
   $("login").hidden = ok;
