@@ -141,7 +141,12 @@ def list_tiktok_ids_apify(user: str, limit: int):
     ids = sorted(set(ids), key=int, reverse=True)
     if ids:
         return ids, ""
-    sample = json.dumps(items[0], ensure_ascii=False)[:450] if isinstance(items, list) and items else str(items)[:450]
+    if isinstance(items, list) and items:
+        first = items[0] if isinstance(items[0], dict) else {"value": items[0]}
+        rest = {k: v for k, v in first.items() if k != "authorMeta"}   # بيانات الملف الشخصي لا تهمنا
+        sample = f"keys={list(first.keys())} rest={json.dumps(rest, ensure_ascii=False)[:380]}"
+    else:
+        sample = str(items)[:450]
     return [], f"Apify أرجع {len(items) if isinstance(items, list) else '?'} عنصراً بلا منشورات صالحة. أول عنصر: {sample}"
 
 
