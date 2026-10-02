@@ -1,0 +1,42 @@
+name: Save posts
+
+on:
+  schedule:
+    - cron: "17 */3 * * *"   # كل 3 ساعات
+  workflow_dispatch:          # تشغيل يدوي من تبويب Actions
+
+permissions:
+  contents: read
+
+concurrency:
+  group: save-posts
+  cancel-in-progress: false
+
+jobs:
+  save:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: pip install -U yt-dlp requests
+
+      - name: Prepare TikTok cookies (optional)
+        env:
+          COOKIES: ${{ secrets.TIKTOK_COOKIES }}
+        run: |
+          if [ -n "$COOKIES" ]; then
+            printf '%s' "$COOKIES" > cookies.txt
+            echo "TIKTOK_COOKIES_FILE=cookies.txt" >> "$GITHUB_ENV"
+          fi
+
+      - name: Save new posts
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python worker/saver.py
