@@ -27,6 +27,9 @@ SB_URL = os.environ["SUPABASE_URL"].rstrip("/")
 SB_KEY = os.environ["SUPABASE_SERVICE_KEY"]
 BUCKET = "archive"
 COOKIES = os.environ.get("TIKTOK_COOKIES_FILE")
+APIFY_TOKEN = os.environ.get("APIFY_TOKEN", "")
+APIFY_ACTOR = "clockworks~tiktok-profile-scraper"
+RESULTS = 5     # عدد أحدث المنشورات التي تُطلب من Apify لكل حساب في كل تشغيل
 H = {"apikey": SB_KEY}
 if not SB_KEY.startswith("sb_"):  # المفاتيح القديمة (JWT) تُرسل أيضاً في Authorization
     H["Authorization"] = f"Bearer {SB_KEY}"
@@ -112,6 +115,31 @@ def list_tiktok_ids(user: str):
         return [], str(e)
     ids = [e["id"] for e in (info or {}).get("entries", []) if e and e.get("id")]
     return ids, ("" if ids else "yt-dlp لم يُرجع أي عناصر")
+
+
+def list_tiktok_ids_apify(user: str, limit: int):
+    """يجلب أحدث منشورات الحساب عبر خدمة Apify (تستخدم عناوين لا يحجبها تيك توك)."""
+    try:
+        r = requests.post(
+            f"https://api.apify.com/v2/acts/{APIFY_ACTOR}/run-sync-get-dataset-items",
+            params={"token": APIFY_TOKEN},
+            json={"profiles": [user], "resultsPerPage": limit,
+                  "shouldDownloadVideos": False, "shouldDownloadCovers": False},
+            timeout=330,
+        )
+        if r.status_code >= 400:
+            return [], f"Apify HTTP {r.status_code}: {r.text[:300]}"
+        items = r.json()
+    except Exception as e:  # noqa: BLE001
+        return [], f"Apify error: {e}"
+    ids = []
+    for it in items if isinstance(items, list) else []:
+        author = ((it.get("authorMeta") or {}).get("name") or "").lower()
+        vid = str(it.get("id") or "")
+        if vid.isdigit() and (not author or author == user.lower()):
+            ids.append(vid)
+    ids = sorted(set(ids), key=int, reverse=True)
+    return ids, ("" if ids else f"Apify أرجع {len(items) if isinstance(items, list) else '?'} عنصراً بلا منشورات صالحة")
 
 
 def list_tiktok_ids_browser(user: str):
@@ -236,9 +264,16 @@ def sync_tiktok(user: str, cap: int) -> None:
     except Exception as e:  # noqa: BLE001
         log(f"[تيك توك] تعذّر التنظيف: {e}")
         note("warning", f"Cleanup @{user}", e)
-    ids, err = list_tiktok_ids(user)
+    ids, err = [], ""
+    if APIFY_TOKEN:
+        ids, err = list_tiktok_ids_apify(user, RESULTS)
+        log(f"[تيك توك] Apify: {len(ids)} منشور لـ @{user}" + (f" ({err})" if err else ""))
+        note("notice", f"TikTok Apify @{user}", f"ids={len(ids)} {err}".strip())
     if not ids:
-        log(f"[تيك توك] yt-dlp لم يجد منشورات لـ @{user}: {err}. أجرّب المتصفح...")
+        ids, err2 = list_tiktok_ids(user)
+        err = f"{err} | yt-dlp: {err2}".strip(" |")
+    if not ids:
+        log(f"[تيك توك] لم تُجلب منشورات لـ @{user}: {err}. أجرّب المتصفح...")
         ids, info = list_tiktok_ids_browser(user)
         log(f"[تيك توك] المتصفح: {len(ids)} معرّف. {info}")
         note("notice", f"TikTok browser @{user}", f"ids={len(ids)} {info}")
@@ -383,7 +418,11 @@ def sync_tellonym(name: str) -> None:
 def main() -> None:
     global errors
     cfg = json.loads((Path(__file__).parent.parent / "config.json").read_text(encoding="utf-8"))
+    global RESULTS
     cap = int(cfg.get("max_new_videos_per_run", 20))
+    RESULTS = int(os.environ.get("APIFY_RESULTS") or cfg.get("apify_results_per_run", 5))
+    if APIFY_TOKEN:
+        cap = max(cap, RESULTS)
     for acc in [a.strip().lstrip("@") for a in os.environ.get("PURGE_ACCOUNTS", "").split(",") if a.strip()]:
         try:
             purge_account(acc)

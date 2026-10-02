@@ -2,9 +2,13 @@ name: Save posts
 
 on:
   schedule:
-    - cron: "17 */3 * * *"   # كل 3 ساعات
+    - cron: "17 3 * * *"     # يومياً (6:17 صباحاً بتوقيت الرياض)
   workflow_dispatch:          # تشغيل يدوي من تبويب Actions
     inputs:
+      backfill:
+        description: "عدد المنشورات القديمة المطلوب حفظها لكل حساب (مثلاً 100). اتركه فارغاً عادةً"
+        required: false
+        default: ""
       purge:
         description: "حسابات يُحذف كل ما حُفظ لها (مفصولة بفاصلة)، اتركه فارغاً عادةً"
         required: false
@@ -29,10 +33,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install
-        run: pip install -U "yt-dlp[default,curl-cffi]" requests playwright
-
-      - name: Install browser (fallback for TikTok)
-        run: playwright install --with-deps chromium
+        run: pip install -U "yt-dlp[default,curl-cffi]" requests
 
       - name: Prepare TikTok cookies (optional)
         env:
@@ -48,4 +49,6 @@ jobs:
           SUPABASE_URL: https://amfkhunxocjmmmumrftr.supabase.co
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           PURGE_ACCOUNTS: ${{ github.event.inputs.purge }}
+          APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
+          APIFY_RESULTS: ${{ github.event.inputs.backfill }}
         run: python worker/saver.py
